@@ -3,7 +3,7 @@
 import os
 import logging
 from dotenv import load_dotenv
-from telegram import Update, Message
+from telegram import Update, Message, InputFile
 from telegram.constants import ChatAction
 from telegram.ext import (
     ApplicationBuilder,
@@ -12,6 +12,8 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+import textwrap
+from pathlib import Path
 
 from log_utils import log_transcription
 from whisper_utils import transcribe_audio, DEVICE
@@ -57,144 +59,140 @@ class TranscriberBot:
     async def start_merge(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        # Narrow update.message
+        """Enable merge-mode for this user and clear previous buffer."""
         message: Message = update.message  # type: ignore[assignment]
         assert message is not None
-
-        # Narrow user_data
         user_data: dict = context.user_data  # type: ignore[union-attr]
-        assert isinstance(user_data, dict)
 
-        if not update.effective_user:
+        if update.effective_user is None:
             await message.reply_text("❌ Unable to identify user.")
             return
-        uid = update.effective_user.id
+
+        user_data["merge_mode"] = True
         user_data["parts"] = []
-        logging.info(f"[{uid}] Merge mode ON")
+        logging.info(f"[{update.effective_user.id}] Merge mode ON")
         await message.reply_text("🔄 Merge mode ON. Send audio parts, then /end_merge")
 
     async def end_merge(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        # Narrow update.message
+        """Merge all buffered parts and process the combined file."""
         message: Message = update.message  # type: ignore[assignment]
         assert message is not None
-
-        # Narrow user_data
         user_data: dict = context.user_data  # type: ignore[union-attr]
-        assert isinstance(user_data, dict)
 
-        if not update.effective_user:
-            await message.reply_text("❌ Unable to identify user.")
-            return
-        uid = update.effective_user.id
-        parts = user_data.pop("parts", [])
+        parts: list[str] = user_data.pop("parts", [])
+        user_data["merge_mode"] = False  # 🔑 turn it off
+
         if not parts:
             await message.reply_text("❌ No buffered parts to merge.")
             return
 
-        merged_path = os.path.join(DOWNLOAD_DIR, f"{uid}_merged.mp3")
-        logging.info(f"[{uid}] Merging {len(parts)} parts → {merged_path}")
-        try:
-            merge_audio_files(parts, merged_path)
-        except Exception as e:
-            logging.exception(f"[{uid}] Merge failed")
-            await message.reply_text(f"❌ Merge failed: {e}")
+        if update.effective_user is None:
+            await message.reply_text("❌ Unable to identify user.")
             return
 
-        await message.reply_text(f"✅ Merged {len(parts)} parts.")
-        await self._process_file(update, merged_path)
+        uid = update.effective_user.id
+        merged_path = os.path.join(DOWNLOAD_DIR, f"{uid}_merged.mp3")
+        logging.info(f"[{uid}] Merging {len(parts)} parts → {merged_path}")
+
+        try:
+            merge_audio_files(parts, merged_path)
+            await message.reply_text(f"✅ Merged {len(parts)} parts.")
+            await self._process_file(update, merged_path)
+        except Exception as exc:
+            logging.exception(f"[{uid}] Merge failed")
+            await message.reply_text(f"❌ Merge failed: {exc}")
 
     async def handle_audio(
         self, update: Update, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
-        # Narrow update.message
+        """Receive a voice/audio message, buffer or transcribe immediately."""
         message: Message = update.message  # type: ignore[assignment]
         assert message is not None
-
-        # Narrow user_data
         user_data: dict = context.user_data  # type: ignore[union-attr]
-        assert isinstance(user_data, dict)
 
-        if not update.effective_user:
-            await message.reply_text("❌ Unable to identify user.")
-            return
-        uid = update.effective_user.id
         file_id = (
             message.voice.file_id
             if message.voice
             else message.audio.file_id if message.audio else None
         )
-        if not file_id:
+        if file_id is None:
             await message.reply_text("❌ Unsupported audio type.")
             return
 
         file_path = os.path.join(DOWNLOAD_DIR, f"{file_id}.mp3")
-        logging.info(f"[{uid}] Downloading {file_id} → {file_path}")
-        tg_file = await context.bot.get_file(file_id)
-        await tg_file.download_to_drive(file_path)
+        await (await context.bot.get_file(file_id)).download_to_drive(file_path)
         await message.reply_text("📥 Received audio part.")
 
-        if "parts" in user_data:
+        if user_data.get("merge_mode", False):
+            # buffer for later merging
             user_data["parts"].append(file_path)
-            count = len(user_data["parts"])
-            logging.info(f"[{uid}] Buffered part #{count}")
-            await message.reply_text(f"🧩 Buffered {count} part(s).")
+            await message.reply_text(f"🧩 Buffered {len(user_data['parts'])} part(s).")
+        else:
+            # transcribe immediately
+            await self._process_file(update, file_path)
 
     async def _process_file(self, update: Update, file_path: str) -> None:
-        # Narrow update.message
-        message: Message = update.message  # type: ignore[assignment]
-        assert message is not None
-
-        if not update.effective_user:
+        """Transcribe `file_path`, send transcript (file or chunks) and summary."""
+        # ── sanity checks ────────────────────────────────────────────────────
+        message: Message = update.message  # type: ignore
+        assert message is not None, "update.message is unexpectedly None"
+        if update.effective_user is None:
             await message.reply_text("❌ Unable to identify user.")
             return
         uid = update.effective_user.id
-        assert message is not None
 
-        uid = update.effective_user.id
+        # ── transcription ───────────────────────────────────────────────────
         logging.info(f"[{uid}] ⏳ Transcribing {file_path}")
-
-        # show “typing…” indicator
         await self.app.bot.send_chat_action(
             chat_id=message.chat.id, action=ChatAction.TYPING
         )
 
-        # 1) transcription
         transcript, elapsed = transcribe_audio(file_path)
         logging.info(f"[{uid}] ✅ Transcribed in {elapsed:.1f}s")
 
-        # save raw transcript
-        txt_path = file_path.replace(".mp3", ".txt")
-        with open(txt_path, "w", encoding="utf-8") as f:
-            f.write(transcript)
-        logging.info(f"[{uid}] Transcript saved to {txt_path}")
+        # save transcript to disk
+        txt_path = Path(file_path).with_suffix(".txt")
+        txt_path.write_text(transcript, encoding="utf-8")
+        logging.info(f"[{uid}] Transcript saved → {txt_path}")
 
-        # log to file
+        # log for stats
         log_transcription(
             file_path=file_path,
             success=bool(transcript),
-            audio_duration_s=0,
+            audio_duration_s=0,  # TODO: pass real duration if desired
             transcribe_time_s=elapsed,
             output_len=len(transcript),
             device=DEVICE,
         )
 
-        # 2) send raw transcript
-        await message.reply_text("📝 Full transcript:")
-        await message.reply_text(transcript or "(empty)")
+        # ── send transcript back ────────────────────────────────────────────
+        if not transcript:
+            await message.reply_text("📝 Transcript is empty.")
+        elif len(transcript) > 4000:
+            # Too long for a single Telegram message → send as a document
+            await message.reply_document(
+                document=InputFile(str(txt_path)),
+                caption="📝 Full transcript (attached file)",
+            )
+        else:
+            # Short enough → send as one or more text messages (chunk at 4000)
+            await message.reply_text("📝 Full transcript:")
+            for chunk in textwrap.wrap(transcript, 4000):
+                await message.reply_text(chunk)
 
-        # 3) summarization
-        logging.info(f"[{uid}] ⚙️ Summarizing transcript")
-        await message.reply_text("🔍 Summarizing…")
+        # ── summarisation ───────────────────────────────────────────────────
+        logging.info(f"[{uid}] ⚙️ Summarising transcript")
+        await message.reply_text("🔍 Summarising…")
         try:
             summary = llm_utils.summarize_text(transcript)
-            logging.info(f"[{uid}] ✅ Summary ready")
             await message.reply_text("📄 Summary:")
             await message.reply_text(summary)
+            logging.info(f"[{uid}] ✅ Summary sent")
         except Exception as e:
-            logging.exception(f"[{uid}] Summarization failed")
-            await message.reply_text(f"❌ Summarization failed: {e}")
+            logging.exception(f"[{uid}] Summarisation failed")
+            await message.reply_text(f"❌ Summarisation failed: {e}")
 
     def run(self) -> None:
         logging.info("🚀 Bot polling for messages…")
