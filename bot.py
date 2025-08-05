@@ -187,6 +187,7 @@ class TranscriberBot:
         await message.reply_text("🔍 Summarising…")
         try:
             summary = llm_utils.summarize_text(transcript)
+            logging.info(f"[{uid}] Summary: {summary}")
             await message.reply_text("📄 Summary:")
             await message.reply_text(summary)
             logging.info(f"[{uid}] ✅ Summary sent")

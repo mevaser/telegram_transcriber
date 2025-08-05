@@ -23,8 +23,8 @@ def summarize_text(text: str) -> str:
         max_length=2000,
         min_length=50,
         do_sample=False,
-        source_lang="he_HE",
-        tgt_lang="he_HE",
+        # source_lang="he_HE",
+        # tgt_lang="he_HE",
     )
 
     # Check for result structure safety
