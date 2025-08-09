@@ -2,5 +2,4 @@ python-dotenv
 python-telegram-bot==20.3
 transformers
 torch
-whisper
 pydub
