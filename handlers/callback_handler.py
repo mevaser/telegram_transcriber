@@ -1,0 +1,179 @@
+# handlers/callback_handler.py
+import time
+from pathlib import Path
+from typing import Dict, Any, List, cast, Any as _Any
+
+from telegram import Update
+from telegram.ext import ContextTypes
+from telegram.error import BadRequest
+
+from .menu_handler import main_menu
+from .constants import (
+    STATE_MODE,
+    MODE_TRANSCRIBE,
+    MODE_SUMMARIZE,
+    MODE_BOTH,
+    STATE_PARTS,
+    STATE_COLLECTING,
+    PARTS_DIR,
+    MERGED_DIR,
+    TRANSCRIPTS_DIR,
+    CB_SET_MODE_TRANSCRIBE,
+    CB_SET_MODE_SUMMARIZE,
+    CB_SET_MODE_BOTH,
+    CB_MORE_YES,
+    CB_MORE_NO,
+)
+
+from processors.merge_processor import MergeProcessor
+from processors.transcription_processor import TranscriptionProcessor
+from processors.summary_processor import SummaryProcessor
+
+# ensure dirs (defensive)
+for d in (Path(PARTS_DIR), Path(MERGED_DIR), Path(TRANSCRIPTS_DIR)):
+    Path(d).mkdir(parents=True, exist_ok=True)
+
+# singletons
+merger = MergeProcessor(merged_dir=MERGED_DIR)
+transcriber = TranscriptionProcessor(transcripts_dir=TRANSCRIPTS_DIR)
+summarizer = SummaryProcessor()
+
+
+# --- safe edit helper to avoid 'Message is not modified' ---
+def _markup_equal(a: _Any, b: _Any) -> bool:
+    if a is b:
+        return True
+    if (a is None) != (b is None):
+        return False
+    try:
+        return a.to_dict() == b.to_dict()
+    except Exception:
+        return str(a) == str(b)
+
+
+async def safe_edit(query, text: str, reply_markup=None, parse_mode=None):
+    msg = query.message
+    try:
+        if msg is None:
+            await query.answer()
+            return
+        current_text = msg.text or msg.caption or ""
+        if current_text != text or not _markup_equal(msg.reply_markup, reply_markup):
+            await query.edit_message_text(
+                text=text, reply_markup=reply_markup, parse_mode=parse_mode
+            )
+        else:
+            await query.answer()
+    except BadRequest as e:
+        if "Message is not modified" in str(e):
+            return
+        raise
+
+
+def _mode_label(mode: str) -> str:
+    if mode == MODE_BOTH:
+        return "Transcribe + Summarize"
+    if mode == MODE_SUMMARIZE:
+        return "Summarize Only"
+    return "Transcribe Only"
+
+
+async def _process_current_mode(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, audio_path: str
+) -> None:
+    ud = cast(Dict[str, Any], context.user_data)
+    mode = cast(str, ud.get(STATE_MODE, MODE_TRANSCRIBE))
+
+    msg = update.effective_message or (
+        update.callback_query.message if update.callback_query else None
+    )
+    if msg:
+        await msg.reply_text(f"🚀 Processing: {_mode_label(mode)} ...")
+
+    processor_mode = {
+        MODE_TRANSCRIBE: "transcribe",
+        MODE_SUMMARIZE: "summarize",
+        MODE_BOTH: "transcribe_and_summarize",
+    }[mode]
+
+    await transcriber.process_file(
+        update, audio_path, mode=processor_mode, summarizer=summarizer
+    )
+
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    data = query.data or ""
+    await query.answer()
+
+    ud = cast(Dict[str, Any], context.user_data)
+    ud.setdefault(STATE_PARTS, [])
+    ud.setdefault(STATE_MODE, MODE_TRANSCRIBE)
+
+    # --- mode switching ---
+    if data == CB_SET_MODE_TRANSCRIBE:
+        ud[STATE_MODE] = MODE_TRANSCRIBE
+        ud[STATE_COLLECTING] = False
+        ud[STATE_PARTS] = []
+        await safe_edit(
+            query,
+            "Mode set to: Transcribe Only.\nSend audio to transcribe.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if data == CB_SET_MODE_SUMMARIZE:
+        ud[STATE_MODE] = MODE_SUMMARIZE
+        ud[STATE_COLLECTING] = False
+        ud[STATE_PARTS] = []
+        await safe_edit(
+            query,
+            "Mode set to: Summarize Only.\nSend audio to summarize.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    if data == CB_SET_MODE_BOTH:
+        ud[STATE_MODE] = MODE_BOTH
+        ud[STATE_COLLECTING] = False
+        ud[STATE_PARTS] = []
+        await safe_edit(
+            query,
+            "Mode set to: Transcribe + Summarize.\nSend audio to process.",
+            reply_markup=main_menu(),
+        )
+        return
+
+    # --- add-more flow ---
+    if data == CB_MORE_YES:
+        ud[STATE_COLLECTING] = True
+        await safe_edit(
+            query, "OK. Send the next audio file…", reply_markup=main_menu()
+        )
+        return
+
+    if data == CB_MORE_NO:
+        parts: List[str] = cast(List[str], ud.get(STATE_PARTS, []))
+        ud[STATE_COLLECTING] = False
+
+        if not parts:
+            await safe_edit(query, "No files to process.", reply_markup=main_menu())
+            return
+
+        if len(parts) == 1:
+            final_path = parts[0]
+        else:
+            user = update.effective_user
+            uid = user.id if user else int(time.time())
+            out_name = f"{uid}_{int(time.time())}_merged.ogg"
+            final_path = merger.merge(parts, out_name)
+
+        ud[STATE_PARTS] = []
+
+        await safe_edit(query, "Starting processing…", reply_markup=None)
+        await _process_current_mode(update, context, final_path)
+        return
+
+    await safe_edit(query, "Unsupported action.", reply_markup=main_menu())
