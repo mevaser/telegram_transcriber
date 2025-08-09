@@ -33,15 +33,16 @@ htmlcov/
 # Misc
 *.log
 
-# Ignore transcripts directory
-/transcripts/
-
+# Ignore data directory
+data/
 # Ignore compare_transcripts output and audio files
 /compare_transcripts/*.docx
 /compare_transcripts/*.txt
 /compare_transcripts/audio/
 /compare_transcripts/venv*/
 /compare_transcripts/venv310/
+
 # Ignore transcript and truth text files
 /compare_transcripts/transcripts/
 /compare_transcripts/truths/
+
