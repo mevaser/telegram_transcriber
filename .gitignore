@@ -46,3 +46,6 @@ data/
 /compare_transcripts/transcripts/
 /compare_transcripts/truths/
 
+
+# Ignore zip files
+*.zip
