@@ -1,4 +1,7 @@
 # processors/transcription_processor.py
+from __future__ import annotations
+
+import os
 import asyncio
 import logging
 import textwrap
@@ -10,8 +13,12 @@ from telegram import Update, InputFile
 from telegram.constants import ChatAction
 
 from utils.ivritAI_utils import transcribe_audio, DEVICE
-from utils.log_utils import log_transcription
+from utils.log_utils import log_transcription, log_artifact
 import utils.llm_utils as llm_utils
+from handlers.constants import SUMMARIES_DIR  # summaries go here
+
+# Controls whether to attach .txt files back to Telegram (which causes client auto-download)
+ATTACH_TXT_FILES = os.getenv("ATTACH_TXT_FILES", "1") == "1"
 
 
 def _chunk_for_telegram(text: str, limit: int = 3800):
@@ -39,7 +46,7 @@ class TranscriptionProcessor:
     """
 
     def __init__(self, transcripts_dir: str):
-        self.transcripts_dir = Path(transcripts_dir)
+        self.transcripts_dir = Path(transcripts_dir).expanduser().resolve()
         self.transcripts_dir.mkdir(parents=True, exist_ok=True)
 
     async def _heartbeat(self, update: Update, stop: asyncio.Event) -> None:
@@ -70,7 +77,7 @@ class TranscriptionProcessor:
             return
 
         uid = update.effective_user.id if update.effective_user else "unknown"
-        audio_path = Path(file_path).resolve()
+        audio_path = Path(file_path).expanduser().resolve()
         stamp = self._stamp()
 
         await message.reply_text("⏳ Starting transcription...")
@@ -111,8 +118,9 @@ class TranscriptionProcessor:
 
         # ----- Save transcript -----
         transcript_name = f"transcribe {stamp}.txt"
-        transcript_path = self.transcripts_dir / transcript_name
+        transcript_path = (self.transcripts_dir / transcript_name).resolve()
         transcript_path.write_text(transcript_text, encoding="utf-8")
+        log_artifact("Transcript saved", str(transcript_path))
 
         # 1) Status line (separate message)
         await message.reply_text(f"✅ Transcribed ({transcribe_secs:.1f}s)")
@@ -123,12 +131,15 @@ class TranscriptionProcessor:
             for chunk in _chunk_for_telegram(transcript_text):
                 await message.reply_text(chunk)
 
-            # attach the .txt file
-            try:
-                with transcript_path.open("rb") as f:
-                    await message.reply_document(InputFile(f, filename=transcript_name))
-            except Exception:
-                logging.exception("Failed sending transcript file")
+            # attach the .txt file (optional)
+            if ATTACH_TXT_FILES:
+                try:
+                    with transcript_path.open("rb") as f:
+                        await message.reply_document(
+                            InputFile(f, filename=transcript_name)
+                        )
+                except Exception:
+                    logging.exception("Failed sending transcript file")
 
         log_transcription(
             file_path=str(audio_path),
@@ -145,23 +156,25 @@ class TranscriptionProcessor:
             try:
                 summary_text = llm_utils.summarize_text(transcript_text)
 
-                # Save summary file as requested
+                # Save summary into SUMMARIES_DIR
                 summary_name = f"summarize {stamp}.txt"
-                summary_path = self.transcripts_dir / summary_name
+                summary_path = (SUMMARIES_DIR / summary_name).resolve()
                 summary_path.write_text(summary_text, encoding="utf-8")
+                log_artifact("Summary saved", str(summary_path))
 
                 await message.reply_text("📄 Summary:")
                 for chunk in _chunk_for_telegram(summary_text):
                     await message.reply_text(chunk)
 
-                # attach the summary .txt
-                try:
-                    with summary_path.open("rb") as f:
-                        await message.reply_document(
-                            InputFile(f, filename=summary_name)
-                        )
-                except Exception:
-                    logging.exception("Failed sending summary file")
+                # attach the summary .txt (optional)
+                if ATTACH_TXT_FILES:
+                    try:
+                        with summary_path.open("rb") as f:
+                            await message.reply_document(
+                                InputFile(f, filename=summary_name)
+                            )
+                    except Exception:
+                        logging.exception("Failed sending summary file")
 
             except Exception as e:
                 logging.exception(f"[{uid}] Summarization failed")

@@ -1,16 +1,28 @@
 # handlers/summary_handler.py
 from __future__ import annotations
 
+import os
 import asyncio
+from datetime import datetime
 from pathlib import Path
 from typing import Any, MutableMapping, Optional, cast
 
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import ContextTypes
 
 from .menu_handler import main_menu
-from .constants import STATE_MODE, TRANSCRIPTS_DIR
+from .constants import STATE_MODE, TRANSCRIPTS_DIR, SUMMARIES_DIR
 from processors.summary_processor import SummaryProcessor
+from utils.log_utils import log_artifact
+
+
+# Controls whether to attach .txt files back to Telegram (client may auto-download)
+ATTACH_TXT_FILES = os.getenv("ATTACH_TXT_FILES", "1") == "1"
+
+
+def _stamp() -> str:
+    """Return a filesystem-friendly timestamp."""
+    return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 
 def _load_latest_transcript_from_disk() -> Optional[str]:
@@ -48,18 +60,37 @@ async def trigger_summary_mode(
     if not last_text or not last_text.strip():
         last_text = _load_latest_transcript_from_disk()
 
-    # Use effective chat/message to avoid Optional access warnings
     chat = update.effective_chat
     if last_text and last_text.strip():
         await query.edit_message_text(
             "Summarizing latest transcript…", reply_markup=main_menu()
         )
         sp = SummaryProcessor()
-        summary = await asyncio.to_thread(sp.summarize, last_text)
+        summary = await asyncio.to_thread(sp.summarize, last_text) or ""
+
+        # Save summary under data/summaries
+        stamp = _stamp()
+        summary_name = f"summarize {stamp}.txt"
+        summary_path = (Path(SUMMARIES_DIR) / summary_name).resolve()
+        summary_path.write_text(summary, encoding="utf-8")
+        log_artifact("Summary saved", str(summary_path))
+
         if chat:
+            # Send summary as text
             await context.bot.send_message(
                 chat_id=chat.id, text=summary or "Summary failed."
             )
+            # Optionally attach the .txt file
+            if ATTACH_TXT_FILES and summary:
+                try:
+                    with summary_path.open("rb") as f:
+                        await context.bot.send_document(
+                            chat_id=chat.id,
+                            document=InputFile(f, filename=summary_name),
+                        )
+                except Exception:
+                    # best-effort; do not fail the flow on attachment error
+                    pass
         return
 
     await query.edit_message_text(
@@ -88,8 +119,25 @@ async def handle_summary_text(
     ud["last_transcript_text"] = text
 
     sp = SummaryProcessor()
-    summary = await asyncio.to_thread(sp.summarize, text)
+    summary = await asyncio.to_thread(sp.summarize, text) or ""
+
+    # Save summary under data/summaries
+    stamp = _stamp()
+    summary_name = f"summarize {stamp}.txt"
+    summary_path = (Path(SUMMARIES_DIR) / summary_name).resolve()
+    summary_path.write_text(summary, encoding="utf-8")
+    log_artifact("Summary saved", str(summary_path))
+
+    # Reply with summary text
     await msg.reply_text(summary or "Summary failed.")
+
+    # Optionally attach the .txt file
+    if ATTACH_TXT_FILES and summary:
+        try:
+            with summary_path.open("rb") as f:
+                await msg.reply_document(InputFile(f, filename=summary_name))
+        except Exception:
+            pass
 
 
 async def handle_summary_txt_file(
@@ -111,7 +159,7 @@ async def handle_summary_txt_file(
     out_dir = Path(TRANSCRIPTS_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
     filename = doc.file_name or "uploaded_transcript.txt"
-    out_path = out_dir / filename
+    out_path = (out_dir / filename).resolve()
 
     tg_file = await doc.get_file()
     await tg_file.download_to_drive(custom_path=str(out_path))
@@ -124,5 +172,21 @@ async def handle_summary_txt_file(
     ud["last_transcript_text"] = text
 
     sp = SummaryProcessor()
-    summary = await asyncio.to_thread(sp.summarize, text)
+    summary = await asyncio.to_thread(sp.summarize, text) or ""
+
+    # Save summary under data/summaries
+    stamp = _stamp()
+    summary_name = f"summarize {stamp}.txt"
+    summary_path = (Path(SUMMARIES_DIR) / summary_name).resolve()
+    summary_path.write_text(summary, encoding="utf-8")
+    log_artifact("Summary saved", str(summary_path))
+
     await msg.reply_text(summary or "Summary failed.")
+
+    # Optionally attach the .txt file
+    if ATTACH_TXT_FILES and summary:
+        try:
+            with summary_path.open("rb") as f:
+                await msg.reply_document(InputFile(f, filename=summary_name))
+        except Exception:
+            pass

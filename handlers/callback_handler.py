@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Dict, Any, List, cast, Any as _Any
+from typing import Dict, Any, List, Optional, cast, Any as _Any
 
-from telegram import Update
+from telegram import Update, Message
 from telegram.ext import ContextTypes
 from telegram.error import BadRequest
 
@@ -25,6 +25,8 @@ from .constants import (
     CB_SET_MODE_BOTH,
     CB_MORE_YES,
     CB_MORE_NO,
+    # ensure summaries dir exists as well
+    SUMMARIES_DIR,
 )
 
 from processors.merge_processor import MergeProcessor
@@ -34,13 +36,13 @@ from processors.summary_processor import SummaryProcessor
 # Import the summarize flow (memory → disk → ask user)
 from handlers import summary_handler
 
-# Ensure expected directories exist
-for d in (Path(PARTS_DIR), Path(MERGED_DIR), Path(TRANSCRIPTS_DIR)):
-    Path(d).mkdir(parents=True, exist_ok=True)
+# Ensure expected directories exist (they are Path objects already)
+for d in (PARTS_DIR, MERGED_DIR, TRANSCRIPTS_DIR, SUMMARIES_DIR):
+    d.mkdir(parents=True, exist_ok=True)
 
-# Singletons
-merger = MergeProcessor(merged_dir=MERGED_DIR)
-transcriber = TranscriptionProcessor(transcripts_dir=TRANSCRIPTS_DIR)
+# Singletons (pass str to satisfy type checkers)
+merger = MergeProcessor(merged_dir=str(MERGED_DIR))
+transcriber = TranscriptionProcessor(transcripts_dir=str(TRANSCRIPTS_DIR))
 summarizer = SummaryProcessor()
 
 
@@ -89,10 +91,11 @@ async def _process_current_mode(
     ud = cast(Dict[str, Any], context.user_data)
     mode = cast(str, ud.get(STATE_MODE, MODE_TRANSCRIBE))
 
-    msg = update.effective_message or (
-        update.callback_query.message if update.callback_query else None
+    # Make Pylance happy: annotate as Optional[Message]
+    msg: Optional[Message] = update.effective_message or (
+        update.callback_query.message if update.callback_query else None  # type: ignore[attr-defined]
     )
-    if msg:
+    if msg is not None:
         await msg.reply_text(f"🚀 Processing: {_mode_label(mode)} ...")
 
     processor_mode = {
@@ -170,7 +173,8 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             user = update.effective_user
             uid = user.id if user else int(time.time())
-            out_name = f"{uid}_{int(time.time())}_merged.ogg"
+            # use .opus to match MergeProcessor enforced extension
+            out_name = f"{uid}_{int(time.time())}_merged.opus"
             final_path = merger.merge(parts, out_name)
 
         ud[STATE_PARTS] = []

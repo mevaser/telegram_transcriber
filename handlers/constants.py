@@ -1,5 +1,4 @@
 # handlers/constants.py
-import os
 from pathlib import Path
 
 # --- user_data keys ---
@@ -19,13 +18,14 @@ CB_SET_MODE_BOTH = "set_mode_both"
 CB_MORE_YES = "more_yes"
 CB_MORE_NO = "more_no"
 
-# --- folders (absolute) ---
-BASE_DIR = Path(__file__).resolve().parents[1]
-DATA_DIR = BASE_DIR / "data"
-PARTS_DIR = str(DATA_DIR / "parts")
-MERGED_DIR = str(DATA_DIR / "merged_audio")
-TRANSCRIPTS_DIR = str(Path("data/transcripts"))  # adjust if your path differs
+# --- folders (absolute inside project) ---
+BASE_DIR: Path = Path(__file__).resolve().parents[1]
+DATA_DIR: Path = BASE_DIR / "data"
+PARTS_DIR: Path = DATA_DIR / "parts"
+MERGED_DIR: Path = DATA_DIR / "merged_audio"
+TRANSCRIPTS_DIR: Path = DATA_DIR / "transcripts"  # raw ASR text files
+SUMMARIES_DIR: Path = DATA_DIR / "summaries"  # LLM summaries
 
 # ensure folders exist early
-for p in (PARTS_DIR, MERGED_DIR, TRANSCRIPTS_DIR):
-    Path(p).mkdir(parents=True, exist_ok=True)
+for p in (PARTS_DIR, MERGED_DIR, TRANSCRIPTS_DIR, SUMMARIES_DIR):
+    p.mkdir(parents=True, exist_ok=True)

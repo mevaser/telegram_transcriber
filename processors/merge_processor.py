@@ -1,8 +1,13 @@
 # processors/merge_processor.py
+from __future__ import annotations
+
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import List
+
+from utils.log_utils import log_merge, log_artifact  # <- use merge-specific logs
 
 
 class MergeProcessor:
@@ -16,7 +21,8 @@ class MergeProcessor:
     """
 
     def __init__(self, merged_dir: str):
-        self.merged_dir = Path(merged_dir)
+        # store absolute output dir
+        self.merged_dir = Path(merged_dir).expanduser().resolve()
         self.merged_dir.mkdir(parents=True, exist_ok=True)
 
     def _run(self, cmd: list[str]) -> None:
@@ -53,73 +59,102 @@ class MergeProcessor:
         if not parts:
             raise ValueError("No parts to merge")
 
+        start_ts = time.time()
+
         # Force .opus extension for output
         out_name = Path(out_name).with_suffix(".opus").name
-        out_path = self.merged_dir / out_name
+        out_path = (self.merged_dir / out_name).expanduser().resolve()
 
-        with tempfile.TemporaryDirectory(prefix="merge_norm_") as td:
-            tmpdir = Path(td)
+        # defaults for logging
+        success = False
+        error_msg = ""
+        duration_s = 0.0
 
-            # 1) Normalize all inputs to opus (same params)
-            normalized_paths: list[Path] = []
-            for idx, p in enumerate(parts, start=1):
-                src = Path(p)
-                if not src.exists():
-                    raise FileNotFoundError(f"Missing input: {src}")
+        try:
+            with tempfile.TemporaryDirectory(prefix="merge_norm_") as td:
+                tmpdir = Path(td)
 
-                norm = tmpdir / f"part_{idx:03d}.opus"
-                # Re-encode to Opus 48k mono @ 64 kbps (tweak if you like)
+                # 1) Normalize all inputs to opus (same params)
+                normalized_paths: list[Path] = []
+                for idx, p in enumerate(parts, start=1):
+                    src = Path(p).expanduser().resolve()
+                    if not src.exists():
+                        raise FileNotFoundError(f"Missing input: {src}")
+
+                    norm = tmpdir / f"part_{idx:03d}.opus"
+                    # Re-encode to Opus 48k mono @ 64 kbps
+                    self._run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(src),
+                            "-vn",
+                            "-acodec",
+                            "libopus",
+                            "-b:a",
+                            "64k",
+                            "-ar",
+                            "48000",
+                            "-ac",
+                            "1",
+                            str(norm),
+                        ]
+                    )
+                    normalized_paths.append(norm)
+
+                # 2) Write concat list
+                concat_file = tmpdir / "concat.txt"
+                concat_file.write_text(
+                    "\n".join(f"file '{p.as_posix()}'" for p in normalized_paths),
+                    encoding="utf-8",
+                )
+
+                # 3) Concat using stream copy (no re-encode)
                 self._run(
                     [
                         "ffmpeg",
                         "-y",
+                        "-f",
+                        "concat",
+                        "-safe",
+                        "0",
                         "-i",
-                        str(src),
-                        "-vn",
-                        "-acodec",
-                        "libopus",
-                        "-b:a",
-                        "64k",
-                        "-ar",
-                        "48000",
-                        "-ac",
-                        "1",
-                        str(norm),
+                        str(concat_file),
+                        "-c",
+                        "copy",
+                        str(out_path),
                     ]
                 )
-                normalized_paths.append(norm)
 
-            # 2) Write concat list
-            concat_file = tmpdir / "concat.txt"
-            concat_file.write_text(
-                "\n".join([f"file '{p.as_posix()}'" for p in normalized_paths]),
-                encoding="utf-8",
+            # 4) Sanity-check duration
+            duration_s = self._probe_duration(out_path)
+            if duration_s < 1.0:
+                try:
+                    out_path.unlink(missing_ok=True)
+                finally:
+                    raise RuntimeError(
+                        f"Merged output duration too short ({duration_s:.2f}s)"
+                    )
+
+            # success path
+            log_artifact("Merged audio saved", str(out_path))
+            success = True
+            return str(out_path)
+
+        except Exception as e:
+            # capture the error for logging in finally and re-raise
+            error_msg = str(e)
+            raise
+
+        finally:
+            # unified merge log line regardless of outcome
+            elapsed = time.time() - start_ts
+            log_merge(
+                file_path=str(out_path),
+                success=success,
+                parts_count=len(parts),
+                merge_time_s=elapsed,
+                audio_duration_s=duration_s,
+                error=error_msg,
             )
-
-            # 3) Concat using stream copy (no re-encode)
-            self._run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-f",
-                    "concat",
-                    "-safe",
-                    "0",
-                    "-i",
-                    str(concat_file),
-                    "-c",
-                    "copy",
-                    str(out_path),
-                ]
-            )
-
-        # 4) Sanity-check duration
-        dur = self._probe_duration(out_path)
-        if dur < 1.0:
-            # if concat produced a broken/empty file, delete and fail
-            try:
-                out_path.unlink(missing_ok=True)
-            finally:
-                raise RuntimeError(f"Merged output duration too short ({dur:.2f}s)")
-
-        return str(out_path)
