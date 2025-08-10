@@ -1,4 +1,6 @@
 # handlers/callback_handler.py
+from __future__ import annotations
+
 import time
 from pathlib import Path
 from typing import Dict, Any, List, cast, Any as _Any
@@ -29,17 +31,20 @@ from processors.merge_processor import MergeProcessor
 from processors.transcription_processor import TranscriptionProcessor
 from processors.summary_processor import SummaryProcessor
 
-# ensure dirs (defensive)
+# Import the summarize flow (memory → disk → ask user)
+from handlers import summary_handler
+
+# Ensure expected directories exist
 for d in (Path(PARTS_DIR), Path(MERGED_DIR), Path(TRANSCRIPTS_DIR)):
     Path(d).mkdir(parents=True, exist_ok=True)
 
-# singletons
+# Singletons
 merger = MergeProcessor(merged_dir=MERGED_DIR)
 transcriber = TranscriptionProcessor(transcripts_dir=TRANSCRIPTS_DIR)
 summarizer = SummaryProcessor()
 
 
-# --- safe edit helper to avoid 'Message is not modified' ---
+# --- Safe edit helper to avoid "Message is not modified" exceptions ---
 def _markup_equal(a: _Any, b: _Any) -> bool:
     if a is b:
         return True
@@ -112,7 +117,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ud.setdefault(STATE_PARTS, [])
     ud.setdefault(STATE_MODE, MODE_TRANSCRIBE)
 
-    # --- mode switching ---
+    # --- Mode switching ---
     if data == CB_SET_MODE_TRANSCRIBE:
         ud[STATE_MODE] = MODE_TRANSCRIBE
         ud[STATE_COLLECTING] = False
@@ -125,14 +130,12 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     if data == CB_SET_MODE_SUMMARIZE:
+        # Enter Summarize mode and trigger the summarize flow immediately:
+        # 1) in-memory last transcript → 2) latest .txt on disk → 3) ask for input.
         ud[STATE_MODE] = MODE_SUMMARIZE
         ud[STATE_COLLECTING] = False
         ud[STATE_PARTS] = []
-        await safe_edit(
-            query,
-            "Mode set to: Summarize Only.\nSend audio to summarize.",
-            reply_markup=main_menu(),
-        )
+        await summary_handler.trigger_summary_mode(update, context)
         return
 
     if data == CB_SET_MODE_BOTH:
@@ -146,7 +149,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    # --- add-more flow ---
+    # --- Add-more flow (merge multiple audio parts) ---
     if data == CB_MORE_YES:
         ud[STATE_COLLECTING] = True
         await safe_edit(
@@ -176,4 +179,5 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await _process_current_mode(update, context, final_path)
         return
 
+    # Default fallback
     await safe_edit(query, "Unsupported action.", reply_markup=main_menu())

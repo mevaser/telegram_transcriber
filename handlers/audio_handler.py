@@ -1,4 +1,7 @@
 # handlers/audio_handler.py
+"""
+Audio handling for the Telegram bot.
+"""
 import os
 from pathlib import Path
 from typing import Dict, Any, List, cast, Optional

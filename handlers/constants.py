@@ -24,7 +24,7 @@ BASE_DIR = Path(__file__).resolve().parents[1]
 DATA_DIR = BASE_DIR / "data"
 PARTS_DIR = str(DATA_DIR / "parts")
 MERGED_DIR = str(DATA_DIR / "merged_audio")
-TRANSCRIPTS_DIR = str(DATA_DIR / "transcripts")
+TRANSCRIPTS_DIR = str(Path("data/transcripts"))  # adjust if your path differs
 
 # ensure folders exist early
 for p in (PARTS_DIR, MERGED_DIR, TRANSCRIPTS_DIR):
