@@ -1,7 +1,7 @@
 # handlers/menu_handler.py
 from typing import Optional, Dict, Any, cast
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from telegram.ext import ContextTypes
 
 from .constants import (
@@ -54,8 +54,10 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     )
 
     # Guard access to message to keep the type checker happy
-    msg = update.effective_message or (
+    raw_msg = update.effective_message or (
         update.callback_query.message if update.callback_query else None
     )
-    if msg:
-        await msg.reply_text(text, reply_markup=main_menu(mode))
+
+    if isinstance(raw_msg, Message):
+        await raw_msg.reply_text(text, reply_markup=main_menu(mode))
+    # else: nothing to do (no accessible message in this update type)
