@@ -29,3 +29,13 @@ SUMMARIES_DIR: Path = DATA_DIR / "summaries"  # LLM summaries
 # ensure folders exist early
 for p in (PARTS_DIR, MERGED_DIR, TRANSCRIPTS_DIR, SUMMARIES_DIR):
     p.mkdir(parents=True, exist_ok=True)
+
+# --- Chunking / audio splitting ---
+CHUNK_SEC = 240  # 4 minutes per chunk
+OVERLAP_SEC = 1.2  # seconds of overlap between adjacent chunks
+FFMPEG_BIN = (
+    "ffmpeg"  # change if ffmpeg is not on PATH (e.g., r"C:\ffmpeg\bin\ffmpeg.exe")
+)
+FFPROBE_BIN = (
+    "ffprobe"  # change if ffprobe is not on PATH (e.g., r"C:\ffmpeg\bin\ffprobe.exe")
+)

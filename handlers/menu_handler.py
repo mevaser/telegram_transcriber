@@ -28,15 +28,15 @@ def main_menu(current_mode: Optional[str] = None) -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(
+                    "📝 Transcribe + Summarize", callback_data=CB_SET_MODE_BOTH
+                )
+            ],
+            [
+                InlineKeyboardButton(
                     "🗣️ Transcribe", callback_data=CB_SET_MODE_TRANSCRIBE
                 )
             ],
             [InlineKeyboardButton("📄 Summarize", callback_data=CB_SET_MODE_SUMMARIZE)],
-            [
-                InlineKeyboardButton(
-                    "📝 Transcribe + Summarize", callback_data=CB_SET_MODE_BOTH
-                )
-            ],
         ]
     )
 

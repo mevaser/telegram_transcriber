@@ -85,13 +85,23 @@ class TranscriptionProcessor:
         stop_event = asyncio.Event()
         hb_task = asyncio.create_task(self._heartbeat(update, stop_event))
 
+        # progress callback from the worker thread
+        def _progress(i: int, total: int) -> None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    message.reply_text(f"📝 Transcribing chunk {i}/{total}…"),
+                    asyncio.get_running_loop(),
+                )
+            except Exception:
+                pass
+
         transcript_text = ""
         transcribe_secs = 0.0
         error_text = ""
 
         try:
             transcript_text, transcribe_secs = await asyncio.to_thread(
-                transcribe_audio, str(audio_path)
+                transcribe_audio, str(audio_path), language="he", progress_cb=_progress
             )
         except Exception as e:
             error_text = str(e)
@@ -144,7 +154,7 @@ class TranscriptionProcessor:
         log_transcription(
             file_path=str(audio_path),
             success=True,
-            audio_duration_s=0.0,  # if you want real duration, add ffprobe here too
+            audio_duration_s=0.0,  # could ffprobe here if needed
             transcribe_time_s=transcribe_secs,
             output_len=len(transcript_text),
             device=DEVICE,
@@ -166,7 +176,6 @@ class TranscriptionProcessor:
                 for chunk in _chunk_for_telegram(summary_text):
                     await message.reply_text(chunk)
 
-                # attach the summary .txt (optional)
                 if ATTACH_TXT_FILES:
                     try:
                         with summary_path.open("rb") as f:
