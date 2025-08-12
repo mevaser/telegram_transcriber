@@ -94,7 +94,7 @@ async def _process_current_mode(
     update: Update, context: ContextTypes.DEFAULT_TYPE, audio_path: str
 ) -> None:
     ud = _user_data(context)
-    mode = cast(str, ud.get(STATE_MODE, MODE_TRANSCRIBE))
+    mode = cast(str, ud.get(STATE_MODE, MODE_BOTH))
 
     # Make Pylance happy: annotate as Optional[Message]
     msg: Optional[Message] = update.effective_message or (
@@ -104,7 +104,7 @@ async def _process_current_mode(
         await msg.reply_text(f"🚀 Processing: {_mode_label(mode)} ...")
 
     processor_mode = {
-        MODE_BOTH: "transcribe_and_summarize",
+        MODE_BOTH: "both",
         MODE_TRANSCRIBE: "transcribe",
         MODE_SUMMARIZE: "summarize",
     }[mode]
