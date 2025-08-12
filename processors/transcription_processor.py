@@ -7,22 +7,28 @@ import logging
 import textwrap
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Protocol, runtime_checkable
 
 from telegram import Update, InputFile
 from telegram.constants import ChatAction
 
 from utils.ivritAI_utils import transcribe_audio, DEVICE
 from utils.log_utils import log_transcription, log_artifact
-import utils.llm_utils as llm_utils
-from handlers.constants import SUMMARIES_DIR  # summaries go here
+from handlers.constants import SUMMARIES_DIR  # where summaries are saved
 
-# Controls whether to attach .txt files back to Telegram (which causes client auto-download)
+# Controls whether to attach .txt files back to Telegram (client will auto-download)
 ATTACH_TXT_FILES = os.getenv("ATTACH_TXT_FILES", "1") == "1"
 
 
+@runtime_checkable
+class Summarizer(Protocol):
+    """Protocol for summary providers."""
+
+    def summarize(self, text: str) -> str: ...
+
+
 def _chunk_for_telegram(text: str, limit: int = 3800):
-    """Yield chunks under Telegram's message size with clean breakpoints."""
+    """Yield text chunks under Telegram message limit with clean breaks."""
     text = textwrap.dedent(text).strip()
     if len(text) <= limit:
         yield text
@@ -42,16 +48,20 @@ def _chunk_for_telegram(text: str, limit: int = 3800):
 class TranscriptionProcessor:
     """
     Orchestrates transcription (and optional summarization).
-    Runs the blocking transcribe() in a background thread and
-    sends a heartbeat action so the chat shows activity.
+    Runs the blocking IvritAI transcribe() in a background thread and
+    keeps a 'typing' heartbeat so the user sees activity.
     """
 
-    def __init__(self, transcripts_dir: str):
+    def __init__(self, transcripts_dir: str | Path):
         self.transcripts_dir = Path(transcripts_dir).expanduser().resolve()
         self.transcripts_dir.mkdir(parents=True, exist_ok=True)
 
+    def _stamp(self) -> str:
+        """Return a filesystem-safe timestamp, e.g. 2025-08-12_11-05-30."""
+        return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
     async def _heartbeat(self, update: Update, stop: asyncio.Event) -> None:
-        """Show typing action periodically while a long task is running."""
+        """Send TYPING action every few seconds until 'stop' is set."""
         chat = update.effective_chat
         if not chat:
             return
@@ -62,18 +72,15 @@ class TranscriptionProcessor:
         except Exception:
             logging.exception("Heartbeat failed")
 
-    def _stamp(self) -> str:
-        """Return a filesystem-safe timestamp (e.g., 2025-08-08_18-32-10)."""
-        return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-
     async def process_file(
         self,
         update: Update,
-        file_path: str,
+        file_path: str | Path,
         *,
-        mode: str = "transcribe_and_summarize",  # "transcribe" | "summarize" | "transcribe_and_summarize"
-        summarizer: Optional[object] = None,  # kept for API compatibility
+        mode: str = "both",  # accepts: "transcribe" | "summarize" | "both"
+        summarizer: Optional[Summarizer] = None,  # type-safe protocol
     ) -> None:
+        """Transcribe audio; optionally summarize; send results + save artifacts."""
         message = update.effective_message
         if not message:
             return
@@ -84,32 +91,29 @@ class TranscriptionProcessor:
 
         await message.reply_text("⏳ Starting transcription...")
 
-        # Start heartbeat
+        # Heartbeat while transcribing
         stop_event = asyncio.Event()
         hb_task = asyncio.create_task(self._heartbeat(update, stop_event))
 
-        # Capture the running loop on the main thread.
-        # This loop will be used from the worker thread to schedule UI updates safely.
+        # Capture the main loop for thread-safe UI updates from worker thread
         loop = asyncio.get_running_loop()
 
-        # Progress callback executed inside the worker thread.
-        # We must schedule the coroutine on the captured main loop.
         def _progress(i: int, total: int) -> None:
+            """Called from worker thread; schedule UI update on main loop."""
             try:
                 asyncio.run_coroutine_threadsafe(
                     message.reply_text(f"📝 Transcribing chunk {i}/{total}…"),
                     loop,
                 )
             except Exception:
-                # Never let a progress update failure break the pipeline
-                pass
+                pass  # never break pipeline on progress errors
 
         transcript_text = ""
         transcribe_secs = 0.0
         error_text = ""
 
         try:
-            # Run blocking ASR in a worker thread; pass progress callback
+            # Run blocking ASR in a worker thread
             transcript_text, transcribe_secs = await asyncio.to_thread(
                 transcribe_audio, str(audio_path), language="he", progress_cb=_progress
             )
@@ -118,7 +122,6 @@ class TranscriptionProcessor:
             logging.exception(f"[{uid}] Transcription failed")
             await message.reply_text(f"❌ Transcription failed: {e}")
         finally:
-            # Stop heartbeat regardless of outcome
             stop_event.set()
             try:
                 await hb_task
@@ -126,7 +129,6 @@ class TranscriptionProcessor:
                 pass
 
         if not transcript_text:
-            # Log failure (duration unknown -> 0)
             log_transcription(
                 file_path=str(audio_path),
                 success=False,
@@ -138,16 +140,15 @@ class TranscriptionProcessor:
             )
             return
 
-        # ----- Save transcript -----
+        # Save transcript with timestamped name
         transcript_name = f"transcribe {stamp}.txt"
         transcript_path = (self.transcripts_dir / transcript_name).resolve()
         transcript_path.write_text(transcript_text, encoding="utf-8")
         log_artifact("Transcript saved", str(transcript_path))
 
-        # Status
         await message.reply_text(f"✅ Transcribed ({transcribe_secs:.1f}s)")
 
-        # Return transcript to user (unless summarize-only)
+        # Send transcript (skip if summarize-only)
         if mode != "summarize":
             await message.reply_text("📝 Transcript:")
             for chunk in _chunk_for_telegram(transcript_text):
@@ -166,21 +167,27 @@ class TranscriptionProcessor:
         log_transcription(
             file_path=str(audio_path),
             success=True,
-            audio_duration_s=0.0,  # could use ffprobe if needed
+            audio_duration_s=0.0,  # could add ffprobe duration later
             transcribe_time_s=transcribe_secs,
             output_len=len(transcript_text),
             device=DEVICE,
         )
 
-        # ----- Summarize (if requested) -----
-        if "summarize" in mode:
+        # Summarize if requested ("both" or "summarize")
+        if mode in ("summarize", "both"):
             await message.reply_text("🔍 Summarizing…")
             try:
-                summary_text = llm_utils.summarize_text(transcript_text)
+                if summarizer is not None:
+                    # Pylance-safe: summarizer follows the Summarizer Protocol
+                    summary_text = summarizer.summarize(transcript_text)
+                else:
+                    # Backward-compatible fallback
+                    import utils.llm_utils as llm_utils
 
-                # Save summary
+                    summary_text = llm_utils.summarize_text(transcript_text)
+
                 summary_name = f"summarize {stamp}.txt"
-                summary_path = (SUMMARIES_DIR / summary_name).resolve()
+                summary_path = (Path(SUMMARIES_DIR) / summary_name).resolve()
                 summary_path.write_text(summary_text, encoding="utf-8")
                 log_artifact("Summary saved", str(summary_path))
 
