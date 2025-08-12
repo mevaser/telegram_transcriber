@@ -43,7 +43,7 @@ class TranscriptionProcessor:
         update: Update,
         file_path: str,
         *,
-        mode: str = "transcribe",  # "transcribe" | "summarize" | "transcribe_and_summarize"
+        mode: str = "transcribe_and_summarize",  # "transcribe" | "summarize" | "transcribe_and_summarize"
         summarizer: Optional[object] = None,  # kept for API compatibility
     ) -> None:
         """

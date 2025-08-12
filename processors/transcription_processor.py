@@ -22,6 +22,7 @@ ATTACH_TXT_FILES = os.getenv("ATTACH_TXT_FILES", "1") == "1"
 
 
 def _chunk_for_telegram(text: str, limit: int = 3800):
+    """Yield chunks under Telegram's message size with clean breakpoints."""
     text = textwrap.dedent(text).strip()
     if len(text) <= limit:
         yield text
@@ -50,6 +51,7 @@ class TranscriptionProcessor:
         self.transcripts_dir.mkdir(parents=True, exist_ok=True)
 
     async def _heartbeat(self, update: Update, stop: asyncio.Event) -> None:
+        """Show typing action periodically while a long task is running."""
         chat = update.effective_chat
         if not chat:
             return
@@ -61,7 +63,7 @@ class TranscriptionProcessor:
             logging.exception("Heartbeat failed")
 
     def _stamp(self) -> str:
-        # Example: 2025-08-08_18-32-10
+        """Return a filesystem-safe timestamp (e.g., 2025-08-08_18-32-10)."""
         return datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
     async def process_file(
@@ -69,7 +71,7 @@ class TranscriptionProcessor:
         update: Update,
         file_path: str,
         *,
-        mode: str = "transcribe",  # "transcribe" | "summarize" | "transcribe_and_summarize"
+        mode: str = "transcribe_and_summarize",  # "transcribe" | "summarize" | "transcribe_and_summarize"
         summarizer: Optional[object] = None,  # kept for API compatibility
     ) -> None:
         message = update.effective_message
@@ -82,17 +84,24 @@ class TranscriptionProcessor:
 
         await message.reply_text("⏳ Starting transcription...")
 
+        # Start heartbeat
         stop_event = asyncio.Event()
         hb_task = asyncio.create_task(self._heartbeat(update, stop_event))
 
-        # progress callback from the worker thread
+        # Capture the running loop on the main thread.
+        # This loop will be used from the worker thread to schedule UI updates safely.
+        loop = asyncio.get_running_loop()
+
+        # Progress callback executed inside the worker thread.
+        # We must schedule the coroutine on the captured main loop.
         def _progress(i: int, total: int) -> None:
             try:
                 asyncio.run_coroutine_threadsafe(
                     message.reply_text(f"📝 Transcribing chunk {i}/{total}…"),
-                    asyncio.get_running_loop(),
+                    loop,
                 )
             except Exception:
+                # Never let a progress update failure break the pipeline
                 pass
 
         transcript_text = ""
@@ -100,6 +109,7 @@ class TranscriptionProcessor:
         error_text = ""
 
         try:
+            # Run blocking ASR in a worker thread; pass progress callback
             transcript_text, transcribe_secs = await asyncio.to_thread(
                 transcribe_audio, str(audio_path), language="he", progress_cb=_progress
             )
@@ -108,6 +118,7 @@ class TranscriptionProcessor:
             logging.exception(f"[{uid}] Transcription failed")
             await message.reply_text(f"❌ Transcription failed: {e}")
         finally:
+            # Stop heartbeat regardless of outcome
             stop_event.set()
             try:
                 await hb_task
@@ -115,6 +126,7 @@ class TranscriptionProcessor:
                 pass
 
         if not transcript_text:
+            # Log failure (duration unknown -> 0)
             log_transcription(
                 file_path=str(audio_path),
                 success=False,
@@ -132,16 +144,15 @@ class TranscriptionProcessor:
         transcript_path.write_text(transcript_text, encoding="utf-8")
         log_artifact("Transcript saved", str(transcript_path))
 
-        # 1) Status line (separate message)
+        # Status
         await message.reply_text(f"✅ Transcribed ({transcribe_secs:.1f}s)")
 
-        # 2) Transcript body (unless summarize-only)
+        # Return transcript to user (unless summarize-only)
         if mode != "summarize":
             await message.reply_text("📝 Transcript:")
             for chunk in _chunk_for_telegram(transcript_text):
                 await message.reply_text(chunk)
 
-            # attach the .txt file (optional)
             if ATTACH_TXT_FILES:
                 try:
                     with transcript_path.open("rb") as f:
@@ -151,10 +162,11 @@ class TranscriptionProcessor:
                 except Exception:
                     logging.exception("Failed sending transcript file")
 
+        # Log success
         log_transcription(
             file_path=str(audio_path),
             success=True,
-            audio_duration_s=0.0,  # could ffprobe here if needed
+            audio_duration_s=0.0,  # could use ffprobe if needed
             transcribe_time_s=transcribe_secs,
             output_len=len(transcript_text),
             device=DEVICE,
@@ -166,7 +178,7 @@ class TranscriptionProcessor:
             try:
                 summary_text = llm_utils.summarize_text(transcript_text)
 
-                # Save summary into SUMMARIES_DIR
+                # Save summary
                 summary_name = f"summarize {stamp}.txt"
                 summary_path = (SUMMARIES_DIR / summary_name).resolve()
                 summary_path.write_text(summary_text, encoding="utf-8")
