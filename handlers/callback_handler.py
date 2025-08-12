@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional, cast, Any as _Any
+from typing import Dict, Any, List, Optional, MutableMapping, cast, Any as _Any
 
 from telegram import Update, Message
 from telegram.ext import ContextTypes
@@ -85,10 +85,15 @@ def _mode_label(mode: str) -> str:
     return "Transcribe Only"
 
 
+def _user_data(context: ContextTypes.DEFAULT_TYPE) -> MutableMapping[str, Any]:
+    """Return user_data as a mutable mapping (PTB provides a dict here)."""
+    return cast(MutableMapping[str, Any], context.user_data)
+
+
 async def _process_current_mode(
     update: Update, context: ContextTypes.DEFAULT_TYPE, audio_path: str
 ) -> None:
-    ud = cast(Dict[str, Any], context.user_data)
+    ud = _user_data(context)
     mode = cast(str, ud.get(STATE_MODE, MODE_TRANSCRIBE))
 
     # Make Pylance happy: annotate as Optional[Message]
@@ -99,9 +104,9 @@ async def _process_current_mode(
         await msg.reply_text(f"🚀 Processing: {_mode_label(mode)} ...")
 
     processor_mode = {
+        MODE_BOTH: "transcribe_and_summarize",
         MODE_TRANSCRIBE: "transcribe",
         MODE_SUMMARIZE: "summarize",
-        MODE_BOTH: "transcribe_and_summarize",
     }[mode]
 
     await transcriber.process_file(
@@ -116,9 +121,9 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data or ""
     await query.answer()
 
-    ud = cast(Dict[str, Any], context.user_data)
+    ud = _user_data(context)
     ud.setdefault(STATE_PARTS, [])
-    ud.setdefault(STATE_MODE, MODE_TRANSCRIBE)
+    ud.setdefault(STATE_MODE, MODE_BOTH)
 
     # --- Mode switching ---
     if data == CB_SET_MODE_TRANSCRIBE:

@@ -2,9 +2,10 @@
 """
 Audio handling for the Telegram bot.
 """
-import os
+from __future__ import annotations
+
 from pathlib import Path
-from typing import Dict, Any, List, cast, Optional
+from typing import Any, List, Optional, MutableMapping, cast
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.constants import ChatAction
@@ -24,6 +25,7 @@ from .constants import (
 
 
 def _more_keyboard() -> InlineKeyboardMarkup:
+    """Inline keyboard that asks whether to add another part or start processing."""
     return InlineKeyboardMarkup(
         [
             [
@@ -35,6 +37,7 @@ def _more_keyboard() -> InlineKeyboardMarkup:
 
 
 def _ext_from_remote_path(remote_path: Optional[str]) -> str:
+    """Derive a file extension from Telegram's remote path (fallback .ogg)."""
     if not remote_path:
         return ".ogg"
     ext = Path(remote_path).suffix
@@ -42,17 +45,17 @@ def _ext_from_remote_path(remote_path: Optional[str]) -> str:
 
 
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Save incoming voice/audio to PARTS_DIR and ask whether to add more parts.
+    This handler does not process; processing is triggered via the merge flow.
+    """
     msg = update.effective_message
     if not msg:
         return
 
-    # detect attachment (voice|audio)
-    att = None
-    if msg.voice:
-        att = msg.voice
-    elif msg.audio:
-        att = msg.audio
-    else:
+    # Detect attachment (voice | audio)
+    att = getattr(msg, "voice", None) or getattr(msg, "audio", None)
+    if att is None:
         await msg.reply_text("Unsupported message type. Send voice or audio.")
         return
 
@@ -67,11 +70,18 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
     await tg_file.download_to_drive(custom_path=local_path)
 
-    ud = cast(Dict[str, Any], context.user_data)
+    # Pylance-safe: user_data is a mutable mapping in PTB
+    ud: MutableMapping[str, Any] = cast(MutableMapping[str, Any], context.user_data)
+
     parts: List[str] = cast(List[str], ud.setdefault(STATE_PARTS, []))
     parts.append(local_path)
-    ud.setdefault(STATE_MODE, MODE_TRANSCRIBE)
-    ud[STATE_COLLECTING] = True  # after each upload, ask "add another?"
+
+    # Default UI mode if not set (no "BOTH" mode used here)
+    if STATE_MODE not in ud:
+        ud[STATE_MODE] = MODE_BOTH
+
+    # After each upload, ask whether to add another file
+    ud[STATE_COLLECTING] = True
 
     await msg.reply_text(
         f"Saved part #{len(parts)}.\nAdd another file or start processing?",

@@ -1,5 +1,7 @@
 # handlers/menu_handler.py
-from typing import Optional, Dict, Any, cast
+from __future__ import annotations
+
+from typing import Optional, Dict, Any, MutableMapping, cast
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Message
 from telegram.ext import ContextTypes
@@ -16,6 +18,7 @@ from .constants import (
 
 
 def _mode_label(mode: str) -> str:
+    """Human-readable label for the current mode."""
     if mode == MODE_BOTH:
         return "Transcribe + Summarize"
     if mode == MODE_SUMMARIZE:
@@ -24,6 +27,10 @@ def _mode_label(mode: str) -> str:
 
 
 def main_menu(current_mode: Optional[str] = None) -> InlineKeyboardMarkup:
+    """
+    Build the main menu.
+    First button is Transcribe + Summarize (as requested).
+    """
     return InlineKeyboardMarkup(
         [
             [
@@ -42,9 +49,14 @@ def main_menu(current_mode: Optional[str] = None) -> InlineKeyboardMarkup:
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Cast silences Pylance's optional access warning
-    ud = cast(Dict[str, Any], context.user_data)
-    mode = cast(str, ud.get(STATE_MODE, MODE_TRANSCRIBE))
+    """
+    Entry point command:
+    - Reads current mode from user_data (defaults to MODE_TRANSCRIBE)
+    - Sends a welcome message and the main menu
+    """
+    # PTB provides a real dict; cast keeps type-checkers happy
+    ud: MutableMapping[str, Any] = cast(MutableMapping[str, Any], context.user_data)
+    mode = cast(str, ud.get(STATE_MODE, MODE_BOTH))
 
     text = (
         "Welcome 👋\n\n"
@@ -53,11 +65,11 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         f"\n\nCurrent mode: {_mode_label(mode)}"
     )
 
-    # Guard access to message to keep the type checker happy
+    # Safely obtain a message object to reply to
     raw_msg = update.effective_message or (
         update.callback_query.message if update.callback_query else None
     )
 
     if isinstance(raw_msg, Message):
         await raw_msg.reply_text(text, reply_markup=main_menu(mode))
-    # else: nothing to do (no accessible message in this update type)
+    # else: nothing to reply to (rare update types)
